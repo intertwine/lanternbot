@@ -6,8 +6,9 @@ on:
       days:
         description: "How many days back to look for resolved questions"
         default: "30"
-  schedule:
-    - cron: "0 6 * * 1" # weekly, Monday morning
+  # schedule: DISABLED for lanternbot (E03). Re-enable only after an explicit
+  # decision-card "yes" from Bryan. Upstream value was:
+  #   - cron: "0 6 * * 1" # weekly, Monday morning
 
 # Add concurrency group to prevent parallel runs
 concurrency:

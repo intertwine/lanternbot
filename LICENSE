@@ -1,0 +1,40 @@
+MIT License (applies ONLY to Bryan Young's changes; see "Scope" below)
+
+Copyright (c) 2026 Bryan Young
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+-------------------------------------------------------------------------------
+Scope
+-------------------------------------------------------------------------------
+This repository is a fork of Metaculus/metac-bot-template
+(https://github.com/Metaculus/metac-bot-template). The upstream template has no
+license file. Code and documentation that came from the upstream template
+remain the property of Metaculus and its contributors and stay under whatever
+terms Metaculus sets; this MIT license does NOT relicense them.
+
+The MIT license above covers only the changes and additions made by Bryan Young
+in this fork, including (non-exhaustively): the lanternbot/ package, tests/,
+the LanternBot class, PrivateCommentMetaculusClient and the run logic in
+main.py after the upstream SummerTemplateBot2026 class, and the lanternbot
+edits to README.md, the workflow files, pyproject.toml and bot_helpers.py.
+See NOTICE and the git history for exactly what changed.
+
+The forecasting-tools library used by this bot is published by Metaculus
+under the MIT license (https://github.com/Metaculus/forecasting-tools).

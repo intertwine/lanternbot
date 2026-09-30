@@ -1,3 +1,6 @@
+# lanternbot NOTE: this single-file upstream reference implementation is NOT used
+# by lanternbot's workflows and does not have lanternbot's budget guard, cost log,
+# or no-proxy/no-personal-key protections. Use main.py.
 from __future__ import annotations
 
 import asyncio

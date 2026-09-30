@@ -1,3 +1,63 @@
+# lanternbot
+
+**lanternbot** is a personal hobbyist forecasting bot by **Bryan Young** for the
+[Metaculus FutureEval Fall 2026 bot tournament](https://www.metaculus.com/tournament/fall-futureeval-2026/)
+and MiniBench. It is built on the Metaculus template bot, deliberately kept simple, and public
+from day one. It is a personal project using personal time only; it is not built or operated
+for any company.
+
+- **Licence:** Bryan's changes are MIT (see [LICENSE](LICENSE)). The upstream template
+  code has no licence and remains under Metaculus's terms (see [NOTICE](NOTICE)).
+- **Metaculus bot account:** `lanternbot`.
+
+## What lanternbot changes on top of the template
+
+| Area | Behaviour |
+|---|---|
+| Targets | Fall 2026 tournament **33121** (`fall-futureeval-2026`) + MiniBench (`minibench`). Test mode targets **bot-testing-area 32977 only**. See `lanternbot/config.py`. |
+| Models | OpenRouter only. Forecasts rotate round-robin across `openai/gpt-5.4-mini`, `anthropic/claude-sonnet-4.6`, `google/gemini-3.5-flash` (5 forecasts per question, aggregated by forecasting-tools: median for binary, averaged distributions for MC/numeric/discrete/date). Parser/summariser: `openai/gpt-4.1-mini`. Research: AskNews if configured, else `perplexity/sonar` via OpenRouter. Override with `LANTERN_*_MODEL(S)` variables. |
+| No personal keys | If `OPENROUTER_API_KEY` is missing the bot **exits cleanly (code 0) without forecasting**. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `PERPLEXITY_API_KEY`, `EXA_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY` are removed from the environment at start-up and are not passed by the workflows. |
+| Metaculus LLM proxy | The template (via forecasting-tools' default models) falls back to the Metaculus LLM proxy (`metaculus/...` models, authenticated with `METACULUS_TOKEN`) when no LLM key is set. **lanternbot disables that fallback**: every model is pinned to `openrouter/...` and `metaculus/...` models are rejected unless `LANTERN_ALLOW_METACULUS_PROXY=true`. Reason: E03 is funded only by the Metaculus-sponsored OpenRouter key, the proxy's availability/terms for Fall 2026 are unconfirmed, and its spend can't be read back for the budget guard. |
+| Budget guard | Cap = `min(LANTERN_BUDGET_CAP_USD` (default and maximum **$100**), the OpenRouter key's credit limit`)`, i.e. min(sponsored credits, $100). At the start of every run the bot reads the key's all-time `usage` and `limit` from `GET https://openrouter.ai/api/v1/key` (read-only) and **fails closed** if it can't. Questions are forecast one at a time; a question only starts if a worst-case $1.50 question still fits under the cap. |
+| Per-question cost | Target and hard ceiling **$1.50/question**: each question runs inside a forecasting-tools `MonetaryCostManager` whose hard limit is `min($1.50, remaining budget)`; an over-limit question is aborted and not submitted. Every attempt is appended to `cost_logs/cost_log.jsonl` (litellm cost + an estimated per-request search fee that litellm doesn't price) and uploaded as a workflow artifact; `cost_logs/run_summary.json` and the job summary hold run totals. |
+| Private comments | forecasting-tools posts one comment per forecast (research summary + reasoning) with `is_private=True`. lanternbot uses `PrivateCommentMetaculusClient`, which forces `is_private=True` on every comment. |
+| Question types | Binary, multiple choice, numeric, **discrete** (handled by the numeric path, submitted as a discrete CDF) and date. Conditional handling from the template is kept but isn't used in the tournament. |
+| Retries / rate limits | LLM calls: 3 tries with backoff (forecasting-tools `allowed_tries`), 120 s timeout. Metaculus API: forecasting-tools' exponential backoff + 3.5 s spacing. OpenRouter key check: 4 tries with exponential backoff, honours `Retry-After`. AskNews: SDK rate-limit spacing. One question at a time. |
+| Schedules | **All cron schedules are removed** from the workflows (commented out with the upstream value). Nothing runs on a timer until Bryan approves it. |
+| Dependencies | `forecasting-tools ^0.3.1` (Metaculus recommends ≥ 0.3.0 for Fall 2026), `litellm >=1.103` (needed so current OpenRouter models are priced), Python 3.11–3.13. `metaculus-bot-review` is temporarily removed because it pins forecasting-tools < 0.3.0, so the optional *Review recent forecasts* workflow won't run until it's updated. |
+
+## Secrets (GitHub → repo **Settings → Secrets and variables → Actions → Repository secrets → New repository secret**)
+
+| Name | Required | Value |
+|---|---|---|
+| `METACULUS_TOKEN` | yes | Token of the `lanternbot` bot account (Metaculus settings → My Forecasting Bots). |
+| `OPENROUTER_API_KEY` | yes | **Only** the key Metaculus sends with sponsored credits. Without it the bot does nothing. |
+| `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` | optional | AskNews OAuth client (note: `ASKNEWS_SECRET`, not `ASKNEWS_CLIENT_SECRET`). |
+| `ASKNEWS_API_KEY` | optional | Alternative to the pair above. If both kinds are set, the OAuth pair wins. |
+
+Optional repository **variable** (not secret): `LANTERN_BUDGET_CAP_USD` (values above 100 are clamped to 100).
+
+The Metaculus docs name AskNews credentials inconsistently (`ASKNEWS_API_KEY` on the resources page, `ASKNEWS_SECRET` in this README, `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` in `.env.template`). The code (forecasting-tools 0.3.1 `AskNewsSearcher`) accepts **either** `ASKNEWS_CLIENT_ID` + `ASKNEWS_SECRET` **or** `ASKNEWS_API_KEY`, and the workflows pass all three.
+
+## Running
+
+```bash
+poetry install
+poetry run pytest -q                       # offline tests (network blocked, mocks only)
+poetry run python main.py --mode test_questions --no-publish   # needs real tokens; submits nothing
+```
+
+`--mode test_questions` targets bot-testing-area (32977) only; `--mode tournament` targets Fall 2026 (33121) + MiniBench.
+Don't run against open tournament questions to "test" (tournament rules).
+
+---
+
+# Upstream template README (Metaculus)
+
+*Everything below is the upstream Metaculus README, kept for reference. Where it conflicts with the lanternbot section above
+(e.g. "the workflow is already enabled and will run every 20 minutes", or adding `OPENAI_API_KEY`/`ANTHROPIC_API_KEY`),
+the lanternbot section wins.*
+
 # Simple Metaculus forecasting bot
 This repository contains a simple bot meant to get you started with creating your own bot for the AI Forecasting Tournament. Go to https://www.metaculus.com/futureeval/participate/ for more info and tournament rules (and then go to the  "Getting Started" section of our [resources](https://www.metaculus.com/notebooks/38928/ai-benchmark-resources/#want-to-join-the-ai-forecasting-benchmark) page).
 

@@ -73,9 +73,11 @@ def check_environment(strict: bool = True) -> None:
         for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
     )
     if not has_llm_key:
+        # lanternbot: main.py exits before this point when OPENROUTER_API_KEY is
+        # missing, and never falls back to the Metaculus LLM proxy by default.
         print(
-            "⚠️  No LLM key set (OPENROUTER/OPENAI/ANTHROPIC). The bot will fall back\n"
-            "    to the Metaculus LLM proxy. Free OpenRouter credits: "
+            "⚠️  No LLM key set. lanternbot does not fall back to the Metaculus LLM\n"
+            "    proxy or any personal key. Free OpenRouter credits: "
             "https://forms.gle/aQdYMq9Pisrf1v7d8\n"
         )
 
