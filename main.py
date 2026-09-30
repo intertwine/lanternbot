@@ -1,8 +1,12 @@
 import argparse
 import asyncio
+import itertools
+import json
 import logging
+import os
+import sys
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, Sequence
 
 import dotenv
 
@@ -40,13 +44,44 @@ from forecasting_tools import (
     clean_indents,
     structure_output,
 )
+from forecasting_tools import MonetaryCostManager
+
+from lanternbot.budget import BudgetExhausted, BudgetGuard
+from lanternbot.config import ModelConfig
+from lanternbot import config as lantern_config
 
 dotenv.load_dotenv()
 logger = logging.getLogger(__name__)
 
 
+class PrivateCommentMetaculusClient(MetaculusClient):
+    """
+    Metaculus requires a comment with every tournament forecast, and E03 wants
+    it private. forecasting-tools already posts one comment per forecast with
+    is_private=True by default (see *Report.publish_report_to_metaculus); this
+    subclass makes that unconditional so no code path can post a public one.
+    """
+
+    def post_question_comment(  # type: ignore[override]
+        self,
+        post_id: int,
+        comment_text: str,
+        is_private: bool = True,
+        included_forecast: bool = True,
+    ) -> None:
+        if not is_private:
+            logger.warning("Refusing to post a public comment; forcing is_private=True")
+        return super().post_question_comment(
+            post_id, comment_text, is_private=True, included_forecast=included_forecast
+        )
+
+
 class SummerTemplateBot2026(ForecastBot):
     """
+    (Upstream Metaculus template class, kept unchanged apart from routing the
+    forecasting LLM through `_forecaster_llm()`. lanternbot's additions live in
+    `LanternBot` below.)
+
     This is the template bot for Summer 2026 Metaculus AI Tournament.
     This is a copy of what is used by Metaculus to run the Metac Bots in our benchmark, provided as a template for new bot makers.
     This template is given as-is, and is use-at-your-own-risk.
@@ -128,6 +163,9 @@ class SummerTemplateBot2026(ForecastBot):
     )
     _concurrency_limiter = asyncio.Semaphore(_max_concurrent_questions)
     _structure_output_validation_samples = 2
+
+    def _forecaster_llm(self) -> GeneralLlm:
+        return self.get_llm("default", "llm")
 
     ##################################### RESEARCH #####################################
 
@@ -228,7 +266,7 @@ class SummerTemplateBot2026(ForecastBot):
         question: BinaryQuestion,
         prompt: str,
     ) -> ReasonedPrediction[float]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._forecaster_llm().invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         binary_prediction: BinaryPrediction = await structure_output(
             reasoning,
@@ -302,7 +340,7 @@ class SummerTemplateBot2026(ForecastBot):
             Additionally, you may sometimes need to parse a 0% probability. Please do not skip options with 0% but rather make it an entry in your final list with 0% probability.
             """
         )
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._forecaster_llm().invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         predicted_option_list: PredictedOptionList = await structure_output(
             text_to_structure=reasoning,
@@ -385,7 +423,7 @@ class SummerTemplateBot2026(ForecastBot):
         question: NumericQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._forecaster_llm().invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
             f"""
@@ -479,7 +517,7 @@ class SummerTemplateBot2026(ForecastBot):
         question: DateQuestion,
         prompt: str,
     ) -> ReasonedPrediction[NumericDistribution]:
-        reasoning = await self.get_llm("default", "llm").invoke(prompt)
+        reasoning = await self._forecaster_llm().invoke(prompt)
         logger.info(f"Reasoning for URL {question.page_url}: {reasoning}")
         parsing_instructions = clean_indents(
             f"""
@@ -646,100 +684,275 @@ class SummerTemplateBot2026(ForecastBot):
         )
 
 
-if __name__ == "__main__":
+class LanternBot(SummerTemplateBot2026):
+    """
+    lanternbot: Bryan Young's personal hobbyist bot for the Metaculus FutureEval
+    Fall 2026 tournament and MiniBench.
+
+    Changes on top of the template:
+    - Forecasts rotate round-robin across several OpenRouter models.
+    - Questions are forecast strictly one at a time, each inside a
+      MonetaryCostManager whose hard limit is min($1.50, budget remaining).
+    - A BudgetGuard stops forecasting before a question could push cumulative
+      spend past the cycle cap; every question attempt is logged (JSONL).
+    """
+
+    def __init__(
+        self,
+        *args,
+        budget_guard: BudgetGuard,
+        forecaster_llms: Sequence[GeneralLlm],
+        research_is_paid_search: bool,
+        project_label: str | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if not forecaster_llms:
+            raise ValueError("At least one forecaster model is required")
+        self.budget_guard = budget_guard
+        self._forecaster_llms = list(forecaster_llms)
+        self._forecaster_cycle = itertools.cycle(self._forecaster_llms)
+        self.research_is_paid_search = research_is_paid_search
+        self.project_label = project_label
+
+    def _forecaster_llm(self) -> GeneralLlm:
+        return next(self._forecaster_cycle)
+
+    async def forecast_on_tournament(  # type: ignore[override]
+        self, tournament_id: int | str, return_exceptions: bool = False
+    ):
+        self.project_label = str(tournament_id)
+        if self.budget_guard.stopped:
+            logger.warning(f"Budget guard already stopped; not fetching {tournament_id}")
+            return []
+        return await super().forecast_on_tournament(tournament_id, return_exceptions)
+
+    async def forecast_questions(  # type: ignore[override]
+        self,
+        questions: Sequence[MetaculusQuestion],
+        return_exceptions: bool = False,
+    ):
+        if self.skip_previously_forecasted_questions:
+            before = len(questions)
+            questions = [q for q in questions if not q.already_forecasted]
+            if before != len(questions):
+                logger.info(f"Skipping {before - len(questions)} previously forecasted questions")
+
+        reports: list = []
+        original_skip = self.skip_previously_forecasted_questions
+        # Already filtered above; avoid the parent's per-question warning.
+        self.skip_previously_forecasted_questions = False
+        try:
+            for question in questions:
+                try:
+                    self.budget_guard.check_can_start_question()
+                except BudgetExhausted as e:
+                    logger.error(str(e))
+                    print(f"\n🛑  {e}\n")
+                    break
+                hard_limit = self.budget_guard.per_question_hard_limit()
+                cost = 0.0
+                result = None
+                error: str | None = None
+                with MonetaryCostManager(hard_limit=hard_limit) as cm:
+                    try:
+                        result = (
+                            await super().forecast_questions([question], return_exceptions)
+                        )[0]
+                    except BaseException as e:  # noqa: BLE001 - logged then re-raised
+                        cost = cm.current_usage
+                        self._record(question, cost, e)
+                        raise
+                    cost = cm.current_usage
+                if isinstance(result, BaseException):
+                    error = f"{type(result).__name__}: {str(result)[:500]}"
+                self._record(question, cost, result if error else None)
+                reports.append(result)
+        finally:
+            self.skip_previously_forecasted_questions = original_skip
+        return reports
+
+    def _record(self, question: MetaculusQuestion, cost: float, err) -> None:
+        submitted = err is None and self.publish_reports_to_metaculus
+        self.budget_guard.record_question(
+            question_url=question.page_url,
+            question_id=question.id_of_question,
+            question_type=type(question).__name__,
+            project=self.project_label,
+            litellm_cost_usd=cost,
+            research_calls=(
+                self.research_reports_per_question if self.research_is_paid_search else 0
+            ),
+            status="ok" if err is None else "error",
+            submitted=submitted,
+            error=None if err is None else f"{type(err).__name__}: {str(err)[:500]}",
+        )
+
+
+def strip_personal_keys() -> list[str]:
+    """Remove any non-OpenRouter LLM/search keys from the environment so that
+    forecasting-tools can never fall back to a personal key."""
+    removed = []
+    for name in lantern_config.PERSONAL_KEY_ENV_VARS:
+        if os.environ.pop(name, None) is not None:
+            removed.append(name)
+    return removed
+
+
+def build_llms(models: ModelConfig) -> tuple[dict, list[GeneralLlm], bool]:
+    def llm(model: str, temperature: float) -> GeneralLlm:
+        return GeneralLlm(
+            model=model,
+            temperature=temperature,
+            timeout=lantern_config.LLM_TIMEOUT_SECONDS,
+            allowed_tries=lantern_config.LLM_ALLOWED_TRIES,
+        )
+
+    forecasters = [llm(m, 0.3) for m in models.forecasters]
+    if lantern_config.asknews_credentials_present():
+        researcher: object = "asknews/news-summaries"
+        paid_search = False  # AskNews free bot tier; not billed through OpenRouter
+    else:
+        researcher = llm(models.research_model, 0.1)
+        paid_search = True
+    llms = {
+        "default": forecasters[0],
+        "summarizer": llm(models.summarizer, 0.3),
+        "researcher": researcher,
+        "parser": llm(models.parser, 0.3),
+    }
+    return llms, forecasters, paid_search
+
+
+def write_run_summary(guard: BudgetGuard, reports: list, path: str) -> None:
+    summary = {
+        **guard.summary(),
+        "reports_ok": sum(1 for r in reports if not isinstance(r, BaseException)),
+        "reports_failed": sum(1 for r in reports if isinstance(r, BaseException)),
+    }
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    step_summary = os.getenv("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as f:
+            f.write("## lanternbot run\n\n```json\n" + json.dumps(summary, indent=2) + "\n```\n")
+    print(json.dumps(summary, indent=2))
+
+
+def main(argv: list[str] | None = None) -> int:
+    from bot_helpers import _is_real_env
+    from lanternbot.budget import BudgetCheckFailed, CostLedger, fetch_openrouter_key_status
+    from lanternbot.config import BudgetConfig
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Run the template forecasting bot")
+    parser = argparse.ArgumentParser(description="Run lanternbot")
     parser.add_argument(
         "--mode",
         type=str,
         choices=["tournament", "metaculus_cup", "test_questions"],
         default="tournament",
-        help="What to forecast on (default: tournament)",
+        help="What to forecast on (default: tournament = Fall 2026 + MiniBench)",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--no-publish",
+        action="store_true",
+        help="Produce forecasts but do not submit them or post comments",
+    )
+    args = parser.parse_args(argv)
     run_mode: Literal["tournament", "metaculus_cup", "test_questions"] = args.mode
 
+    removed = strip_personal_keys()
+    if removed:
+        print(f"🔒  Ignoring non-sponsored keys (no personal-key fallback): {removed}")
+
+    # 1) No sponsored OpenRouter key -> exit cleanly, forecast nothing.
+    if not _is_real_env("OPENROUTER_API_KEY"):
+        print(
+            "ℹ️   OPENROUTER_API_KEY is not set. lanternbot only runs on the "
+            "Metaculus-sponsored OpenRouter key, so it will not forecast. Exiting."
+        )
+        return 0
+
+    # 2) Metaculus token (needed to read and submit).
     check_environment(strict=True)
-    publish_to_metaculus = True
+
+    # 3) Models: OpenRouter only (proxy only if explicitly allowed).
+    models = ModelConfig.from_env()
+    llms, forecasters, paid_search = build_llms(models)
+
+    # 4) Budget guard from authoritative OpenRouter usage; fail closed.
+    budget_cfg = BudgetConfig.from_env()
+    try:
+        key_status = fetch_openrouter_key_status(os.environ["OPENROUTER_API_KEY"])
+    except BudgetCheckFailed as e:
+        print(f"❌  Budget check failed, not forecasting (fail closed): {e}")
+        return 1
+    guard = BudgetGuard(budget_cfg, key_status, CostLedger(budget_cfg.cost_log_path))
+    print(
+        f"💰  Budget: spent ${guard.spent_usd:.4f} / cap ${guard.effective_cap_usd:.2f} "
+        f"(remaining ${guard.remaining_usd:.4f}; per-question max "
+        f"${budget_cfg.max_cost_per_question_usd:.2f})"
+    )
+
+    publish_to_metaculus = not args.no_publish
     print_startup_banner(run_mode, will_publish=publish_to_metaculus)
 
-    # Configure the bot. The `llms=` block below is commented out to use
-    # whichever default models forecasting-tools picks based on your env vars;
-    # uncomment and edit to pin specific models.
-    template_bot = SummerTemplateBot2026(
-        research_reports_per_question=1,
-        predictions_per_research_report=5,
+    bot = LanternBot(
+        research_reports_per_question=lantern_config.RESEARCH_REPORTS_PER_QUESTION,
+        predictions_per_research_report=lantern_config.PREDICTIONS_PER_RESEARCH_REPORT,
         use_research_summary_to_forecast=False,
         publish_reports_to_metaculus=publish_to_metaculus,
         folder_to_save_reports_to=None,
         skip_previously_forecasted_questions=True,
         extra_metadata_in_explanation=True,
-        # llms={
-        #     "default": GeneralLlm(
-        #         model="openrouter/openai/gpt-4o",
-        #         temperature=0.3,
-        #         timeout=40,
-        #         allowed_tries=2,
-        #     ),
-        #     "summarizer": "openai/gpt-4o-mini",
-        #     "researcher": "asknews/news-summaries",
-        #     "parser": "openai/gpt-4o-mini",
-        # },
+        llms=llms,
+        metaculus_client=PrivateCommentMetaculusClient(),
+        budget_guard=guard,
+        forecaster_llms=forecasters,
+        research_is_paid_search=paid_search,
     )
 
-    # Per-mode tournament URL shown in the summary banner footer. These
-    # piggyback on the forecasting_tools SDK constants and need updating
-    # whenever those rotate seasons.
-    TOURNAMENT_URLS = {
-        "tournament": "https://www.metaculus.com/tournament/summer-futureeval-2026/",
-        "metaculus_cup": "https://www.metaculus.com/tournament/metaculus-cup-summer-2025/",
-        "test_questions": "https://www.metaculus.com/tournament/bot-testing-area/",
-    }
-
-    # Dispatch on mode. Each branch produces a list of ForecastReport (or
-    # exceptions, since return_exceptions=True) which then flows into the
-    # summary printers below.
-    client = MetaculusClient()
     if run_mode == "tournament":
-        seasonal_tournament_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_AI_COMPETITION_ID, return_exceptions=True
+        reports = asyncio.run(
+            bot.forecast_on_tournament(
+                lantern_config.FALL_2026_TOURNAMENT_ID, return_exceptions=True
             )
         )
-        minibench_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_MINIBENCH_ID, return_exceptions=True
-            )
+        reports += asyncio.run(
+            bot.forecast_on_tournament(lantern_config.MINIBENCH_ID, return_exceptions=True)
         )
-        forecast_reports = seasonal_tournament_reports + minibench_reports
     elif run_mode == "metaculus_cup":
-        # The Metaculus Cup may be uninitialized near the start of a season
-        # (Jan/May/Sep). AXC_2025_TOURNAMENT_ID = 32564 and
-        # AI_2027_TOURNAMENT_ID = "ai-2027" are also valid targets here.
-        template_bot.skip_previously_forecasted_questions = False
-        forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                client.CURRENT_METACULUS_CUP_ID, return_exceptions=True
+        # Out of scope for E03; kept for parity with the template.
+        bot.skip_previously_forecasted_questions = False
+        reports = asyncio.run(
+            bot.forecast_on_tournament(
+                MetaculusClient.CURRENT_METACULUS_CUP_ID, return_exceptions=True
             )
         )
-    elif run_mode == "test_questions":
-        # The bot-testing-area tournament contains all question types and is
-        # the recommended target for smoke-testing your bot.
-        # https://www.metaculus.com/tournament/bot-testing-area/
-        template_bot.skip_previously_forecasted_questions = False
-        forecast_reports = asyncio.run(
-            template_bot.forecast_on_tournament(
-                "bot-testing-area", return_exceptions=True
+    else:  # test_questions -> bot-testing-area (32977) ONLY
+        bot.skip_previously_forecasted_questions = False
+        reports = asyncio.run(
+            bot.forecast_on_tournament(
+                lantern_config.BOT_TESTING_AREA_ID, return_exceptions=True
             )
         )
 
-    template_bot.log_report_summary(forecast_reports)
+    bot.log_report_summary(reports)
     print_run_summary_banner(
-        forecast_reports,
+        reports,
         will_publish=publish_to_metaculus,
-        tournament_url=TOURNAMENT_URLS.get(run_mode),
+        tournament_url=lantern_config.TOURNAMENT_URLS.get(run_mode),
     )
+    write_run_summary(
+        guard, reports, os.path.join(os.path.dirname(budget_cfg.cost_log_path) or ".", "run_summary.json")
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -37,15 +37,25 @@ jobs:
         run: poetry install --no-interaction --no-root
       - name: Run bot
         run: |
-          poetry run python main.py --mode test_questions
-        # this reads the environment variables from the github repository.
-        # Store under Settings --> Secrets and variables --> Actions
+          poetry run python main.py --mode test_questions  # bot-testing-area (32977) only
+        # Secrets: Settings > Secrets and variables > Actions > Repository secrets
         env:
-          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }} # replace this with the name of the variable under which you stored your own Metaculus token
-          PERPLEXITY_API_KEY: ${{ secrets.PERPLEXITY_API_KEY }}
-          EXA_API_KEY: ${{ secrets.EXA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          METACULUS_TOKEN: ${{ secrets.METACULUS_TOKEN }}
+          # Metaculus-sponsored OpenRouter key ONLY (no personal keys; see README).
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # AskNews (optional, free bot tier). Set EITHER the OAuth pair
+          # ASKNEWS_CLIENT_ID + ASKNEWS_SECRET OR ASKNEWS_API_KEY.
           ASKNEWS_CLIENT_ID: ${{ secrets.ASKNEWS_CLIENT_ID }}
           ASKNEWS_SECRET: ${{ secrets.ASKNEWS_SECRET }}
+          ASKNEWS_API_KEY: ${{ secrets.ASKNEWS_API_KEY }}
+          # Optional non-secret overrides (Settings > Secrets and variables > Actions > Variables).
+          LANTERN_BUDGET_CAP_USD: ${{ vars.LANTERN_BUDGET_CAP_USD || '100' }}
+          LANTERN_COST_LOG_PATH: cost_logs/cost_log.jsonl
+      - name: Upload cost log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cost-log-${{ github.run_id }}
+          path: cost_logs/
+          if-no-files-found: ignore
+          retention-days: 90

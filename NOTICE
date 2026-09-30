@@ -1,0 +1,12 @@
+lanternbot
+Copyright (c) 2026 Bryan Young (changes only; MIT, see LICENSE)
+
+This project is a fork of Metaculus/metac-bot-template
+https://github.com/Metaculus/metac-bot-template
+The upstream template code has no license and remains under Metaculus's terms.
+Upstream history is preserved in git; everything up to and including commit
+c16d91f ("Revise README for setup instructions and participation (#115)") is
+upstream code.
+
+lanternbot is a personal hobbyist project. It is not affiliated with, endorsed
+by, or operated on behalf of Metaculus or any company.

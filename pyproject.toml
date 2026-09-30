@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "metac-bot-template"
+name = "lanternbot"
 version = "0.1.0"
 description = ""
 authors = ["Vasile Popescu <elisescu@elisescu.com>"]
@@ -7,14 +7,17 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = ">=3.11,<3.14"
 python-decouple = "^3.8"
 requests = "^2.32.3"
-asknews = "^0.13.11"
+asknews = "^0.14.4"
 numpy = "^2.3.0"
 openai = "^2.0.0"
 python-dotenv = "^1.0.1"
-forecasting-tools = "^0.2.90"
+forecasting-tools = "^0.3.1"
+# Recent litellm is needed so the cost table prices the current OpenRouter
+# models (otherwise per-question cost would be logged as $0).
+litellm = ">=1.103.0,<2.0.0"
 
 
 [tool.poetry.group.integrations]
@@ -22,11 +25,15 @@ optional = true
 
 [tool.poetry.group.integrations.dependencies]
 lightningrod-ai = "^0.1.14"
-metaculus-bot-review = "^0.1.1"
+# metaculus-bot-review 0.1.1 pins forecasting-tools <0.3.0, which conflicts with
+# the >=0.3.0 upgrade Metaculus recommends for Fall 2026. Re-add when a
+# compatible release exists (the review_bot workflow needs it).
+# metaculus-bot-review = "^0.1.1"
 
 
 [tool.poetry.group.dev.dependencies]
 ipykernel = "^6.29.5"
+pytest = "^8.3.0"
 
 [build-system]
 requires = ["poetry-core"]
